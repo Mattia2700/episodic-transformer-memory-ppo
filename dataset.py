@@ -34,6 +34,7 @@ def compute_iou(agent, ground_truth):
     return iou
 
 class RefCOCOg(Dataset):
+    dataset_num = 0
     FILE_ID = "1wyyksgdLwnRMC9pQ-vjJnNUn47nWhyMD"
     ARCHIVE_NAME = "refcocog.tar.gz"
     NAME = "refcocog"
@@ -52,6 +53,8 @@ class RefCOCOg(Dataset):
         self._load_json()
         self.transform = transform
         self.model, self.preprocess = clip.load("RN50",device="cuda:0") #,jit=False)
+        RefCOCOg.dataset_num += 1
+        print("Dataset #  ",RefCOCOg.dataset_num)
         # self.model = self.model.to(DEVICE)
         # print("Model loaded in ",self.model.device)
         # checkpoint = torch.load("../RN-50-REFCOCOG.pt")
@@ -138,24 +141,22 @@ class RefCOCOg(Dataset):
         self.annotation = self.annotation[self.annotation["split"] == self.split]
 
     def _get_vector(self, image, sentences):
-            image = self.preprocess(image).unsqueeze(0).to(DEVICE)
+            # image = self.preprocess(image).unsqueeze(0).to(DEVICE)
             text = clip.tokenize(sentences).to(DEVICE)
             with torch.no_grad():
-                image_features = self.model.encode_image(image)
+                # image_features = self.model.encode_image(image)
                 text_features = self.model.encode_text(text)
-            text_features = torch.mean(text_features,dim=0).to(DEVICE)
-            text_features = text_features.unsqueeze(0).to(DEVICE)
+            # text_features = torch.mean(text_features,dim=0).to(DEVICE)
+            out = text_features[0].to(DEVICE)
+            # text_features = text_features.unsqueeze(0).to(DEVICE)
             # bbox = torch.tensor(bbox).unsqueeze(0).to(device)
             # print(f"Image shape: {image_features.shape}, Text shape: {text_features.shape}")
             # Combining embeddings with weighted average
             # out = torch.add(0.4 * image_features ,0.6 * text_features)
             
             # # Combine image and text features and normalize
-            product = torch.mul(image_features, text_features)
-            power = torch.sign(product)* torch.sqrt(torch.abs(product))
-            out = torch.div(power, torch.norm(power, dim=1).reshape(-1, 1))
-            out =torch.mean(out,dim=0)
-            # print(out.shape, power_out.shape)
-            # append bbox
-            # print(f"Output shape: {power_out.shape}")
-            return out.squeeze(0)
+            # product = torch.mul(image_features, text_features).to(DEVICE)
+            # power = torch.sign(product)* torch.sqrt(torch.abs(product)).to(DEVICE)
+            # out = torch.div(power, torch.norm(power, dim=1).reshape(-1, 1)).to(DEVICE)
+            # out =torch.mean(out,dim=0).to(DEVICE)
+            return out#.squeeze(0)

@@ -58,7 +58,7 @@ class MultiHeadAttention(nn.Module):
         queries = self.queries(query)  # (N, query_len, heads, heads_dim)
 
         # Einsum does matrix mult. for query*keys for each training example
-        energy = torch.einsum("nqhd,nkhd->nhqk", [queries, keys])
+        energy = torch.einsum("nqhd,nkhd->nhqk", [queries, keys]).to(DEVICE)
         # queries shape: (N, query_len, heads, heads_dim),
         # keys shape: (N, key_len, heads, heads_dim)
         # energy: (N, heads, query_len, key_len)
@@ -68,13 +68,13 @@ class MultiHeadAttention(nn.Module):
             energy = energy.masked_fill(mask.unsqueeze(1).unsqueeze(1).to(DEVICE) == 0, -1e20).to(DEVICE) # -inf causes NaN
 
         # Normalize energy values and apply softmax wo retreive the attention scores
-        attention = torch.softmax(energy / (self.embed_dim ** (1 / 2)), dim=3)
+        attention = torch.softmax(energy / (self.embed_dim ** (1 / 2)), dim=3).to(DEVICE)
         # attention shape: (N, heads, query_len, key_len)
 
         # Scale values by attention weights
         out = torch.einsum("nhql,nlhd->nqhd", [attention, values]).reshape(
             N, query_len, self.num_heads * self.head_size
-        )
+        ).to(DEVICE)
         # attention shape: (N, heads, query_len, key_len)
         # values shape: (N, value_len, heads, heads_dim)
         # out after matrix multiply: (N, query_len, heads, head_dim), then
@@ -212,7 +212,7 @@ class Transformer(nn.Module):
         if config["positional_encoding"] == "relative":
             self.pos_embedding = SinusoidalPosition(dim = self.embed_dim).to(DEVICE)
         elif config["positional_encoding"] == "learned":
-            self.pos_embedding = nn.Parameter(torch.randn(self.max_episode_steps, self.embed_dim)).to(DEVICE) # (batch size, max episoded steps, num layers, layer size)
+            self.pos_embedding = nn.Parameter(torch.randn(self.max_episode_steps, self.embed_dim).to(DEVICE)) # (batch size, max episoded steps, num layers, layer size)
         else:
             pass    # No positional encoding is used
         
@@ -252,7 +252,7 @@ class Transformer(nn.Module):
             h = h.squeeze()
             if len(h.shape) == 1:
                 h = h.unsqueeze(0)
-        return h, torch.stack(out_memories, dim=1)
+        return h, torch.stack(out_memories, dim=1).to(DEVICE)
     
 class GRUGate(nn.Module):
     """
@@ -276,7 +276,7 @@ class GRUGate(nn.Module):
         self.Uz = nn.Linear(input_dim, input_dim, bias=False).to(DEVICE)
         self.Wg = nn.Linear(input_dim, input_dim, bias=False).to(DEVICE)
         self.Ug = nn.Linear(input_dim, input_dim, bias=False).to(DEVICE)
-        self.bg = nn.Parameter(torch.full([input_dim], bg))  # bias
+        self.bg = nn.Parameter(torch.full([input_dim], bg).to(DEVICE))  # bias
         self.sigmoid = nn.Sigmoid()
         self.tanh = nn.Tanh()
         nn.init.xavier_uniform_(self.Wr.weight)
@@ -296,5 +296,5 @@ class GRUGate(nn.Module):
         """
         r = self.sigmoid(self.Wr(y) + self.Ur(x))
         z = self.sigmoid(self.Wz(y) + self.Uz(x) - self.bg)
-        h = self.tanh(self.Wg(y) + self.Ug(torch.mul(r, x)))
-        return torch.mul(1 - z, x) + torch.mul(z, h)
+        h = self.tanh(self.Wg(y) + self.Ug(torch.mul(r, x).to(DEVICE)))
+        return torch.mul(1 - z, x).to(DEVICE) + torch.mul(z, h).to(DEVICE)

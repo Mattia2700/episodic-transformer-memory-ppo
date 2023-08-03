@@ -3,7 +3,9 @@ import torch
 from torch import nn
 from environments.visual_grounding import VisualGrounding
 
-def create_env(config:dict, dataset, num_agents, render:bool=False):
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+def create_env(config:dict, num_agents, render:bool=False):
     """Initializes an environment based on the provided environment name.
     
     Arguments:
@@ -15,7 +17,7 @@ def create_env(config:dict, dataset, num_agents, render:bool=False):
     """
     if config["type"] == "VisualGroundingEnv":
         print(config)
-        return VisualGrounding(dataset, num_agents)
+        return VisualGrounding(num_agents)
 
 def polynomial_decay(initial:float, final:float, max_decay_steps:int, power:float, current_step:int) -> float:
     """Decays hyperparameters polynomially. If power is set to 1.0, the decay behaves linearly. 
@@ -60,7 +62,7 @@ def batched_index_select(input, dim, index):
     expanse[0] = -1
     expanse[dim] = -1
     index = index.expand(expanse)
-    return torch.gather(input, dim, index)
+    return torch.gather(input, dim, index).to(DEVICE)
 
 def process_episode_info(episode_info:list) -> dict:
     """Extracts the mean and std of completed episode statistics like length and total reward.

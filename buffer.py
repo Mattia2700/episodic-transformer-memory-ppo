@@ -77,7 +77,7 @@ class Buffer():
             {dict} -- Mini batch data for training
         """
         # Prepare indices (shuffle)
-        indices = torch.randperm(self.batch_size)
+        indices = torch.randperm(self.batch_size).to(self.device)
         mini_batch_size = self.batch_size // self.n_mini_batches
         for start in range(0, self.batch_size, mini_batch_size):
             # Compose mini batches
@@ -102,8 +102,8 @@ class Buffer():
         """
         with torch.no_grad():
             last_advantage = 0
-            mask = torch.tensor(self.dones).logical_not() # mask values on terminal states
-            rewards = torch.tensor(self.rewards)
+            mask = torch.tensor(self.dones).logical_not().to(self.device) # mask values on terminal states
+            rewards = torch.tensor(self.rewards).to(self.device)
             for t in reversed(range(self.worker_steps)):
                 last_value = last_value * mask[:, t]
                 last_advantage = last_advantage * mask[:, t]

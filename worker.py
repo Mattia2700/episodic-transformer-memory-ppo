@@ -3,7 +3,7 @@ import multiprocessing.connection
 
 from utils import create_env
 
-def worker_process(remote: multiprocessing.connection.Connection, config:dict, dataset, num_agents) -> None:
+def worker_process(remote: multiprocessing.connection.Connection, config:dict, num_agents) -> None:
     """Executes the threaded interface to the environment.
     
     Arguments:
@@ -12,7 +12,7 @@ def worker_process(remote: multiprocessing.connection.Connection, config:dict, d
     """
     # Spawn training environment
     try:
-        env = create_env(config, dataset, num_agents)
+        env = create_env(config, num_agents)
     except KeyboardInterrupt:
         pass
 
@@ -38,7 +38,7 @@ class Worker:
     child: multiprocessing.connection.Connection
     process: multiprocessing.Process
     
-    def __init__(self, env_config:dict, dataset, num_agents):
+    def __init__(self, env_config:dict, num_agents):
         """
         Arguments:
             env_config {dict} -- Configuration of the training environment
@@ -47,9 +47,9 @@ class Worker:
             multiprocessing.set_start_method("spawn", force=True)
         except RuntimeError:
             pass
-
+        
         self.child, parent = multiprocessing.Pipe()
-        self.process = multiprocessing.Process(target=worker_process, args=(parent, env_config, dataset, num_agents))
+        self.process = multiprocessing.Process(target=worker_process, args=(parent, env_config, num_agents))
         self.process.start()
 
 import tblib.pickling_support

@@ -5,7 +5,7 @@ import torch
 from docopt import docopt
 from model import ActorCriticModel
 from utils import create_env
-
+import torchvision
 import gymnasium as gym
 gym.envs.register(
      id='VisualGroundingEnv-v0',
@@ -55,10 +55,11 @@ def main():
     torch.set_default_tensor_type("torch.FloatTensor")
 
     # Load model and config
-    state_dict, config = torch.load(model_path, map_location=device)
-
+    dict = torch.load(model_path, map_location=device)
+    state_dict = dict["model"]
+    config = dict["params"]
     # Instantiate environment
-    env = create_env(config["environment"], validation, 1, render=True)
+    env = create_env(config["environment"], 1, render=True)
 
     # Initialize model and load its parameters
     model = ActorCriticModel(config, env.observation_space, (env.action_space.n,), env.max_episode_steps)
@@ -78,7 +79,7 @@ def main():
         obs, info = env.reset()
         i = 0
         # print("obs is ",type(obs),"with shape ",obs.shape)
-        while not(info["trigger_pressed"]) and i<env.max_episode_steps:
+        while i<env.max_episode_steps and not(info["trigger_pressed"]):
             # Prepare observation and memory
             # tmp = np.expand_dims(obs, 0)
             # print("tmp is ",tmp.shape)

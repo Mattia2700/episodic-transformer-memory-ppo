@@ -21,11 +21,11 @@ import torch.nn.functional as F
 from collections import deque
 import cv2
 import numpy
-
+from dataset import RefCOCOg
 class VisualGrounding:
     offset = 0
-    def __init__(self, dataset, num_agents):
-        self._env = gym.make("VisualGroundingEnv-v0", dataset=dataset, num_agent=num_agents, agent_offset=VisualGrounding.offset)
+    def __init__(self, num_agents):
+        self._env = gym.make("VisualGroundingEnv-v0", dataset=RefCOCOg("../","val"), num_agent=num_agents, agent_offset=VisualGrounding.offset)
         VisualGrounding.offset += 1
         self.max_episode_steps = self._env.unwrapped.max_episode_steps
         self.length = 0
@@ -216,8 +216,8 @@ class VisualGroundingEnv(gym.Env):
     def _update_bbox(self, action):
       ALPHA = 0.2
       BETA  = 0.1
-      self.x2 = self.x1 + self.bbox_width
-      self.y2 = self.y1 + self.bbox_height
+      # self.x2 = self.x1 + self.bbox_width
+      # self.y2 = self.y1 + self.bbox_height
 
       assert action >= Actions.ACT_RT.value and action <= Actions.ACT_TR.value
       if action <= Actions.ACT_DN.value:
@@ -255,11 +255,26 @@ class VisualGroundingEnv(gym.Env):
         self.x1 -= delta_w
         self.x2 += delta_w
       elif action == Actions.ACT_SR.value:
-        self.y1 += delta_h
-        self.y2 -= delta_h
+        temp_y1 = self.y1 + delta_h 
+        temp_y2 = self.y2 - delta_h
+        if temp_y2 - temp_y1 > self.height // 10:
+          self.y1 = temp_y1
+          self.y2 = temp_y2
+        else:
+          center = (temp_y1 + temp_y2) // 2
+          self.y1 = center - (self.height // 20)
+          self.y2 = center + (self.height // 20)
       elif action == Actions.ACT_TH.value:
-        self.x1 += delta_w
-        self.x2 -= delta_w
+          temp_x1 = self.x1 + delta_w
+          temp_x2 = self.x2 - delta_w 
+          if temp_x2 - temp_x1 >= self.width // 10:
+            self.x1 = temp_x1
+            self.x2 = temp_x2
+          else:
+            # compute the current center and then set x1 to center - 1//20 w and x2 to center + 1//20 w
+            center = (temp_x1 + temp_x2) // 2
+            self.x1 = center - (self.width // 20)
+            self.x2 = center + (self.width // 20)
       elif action == Actions.ACT_TR.value:
         # print("Trigger after ",self.steps_num, " steps")
         pass
@@ -272,10 +287,18 @@ class VisualGroundingEnv(gym.Env):
         self.x1 = 0
       if self.y1 < 0:
         self.y1 = 0
+      if self.x2 < 0:
+        self.x2 = 0
+      if self.y2 < 0:
+        self.y2 = 0
       if self.x2 >= self.width:
         self.x2 = self.width - 1
       if self.y2 >= self.height:
         self.y2 = self.height - 1
+      if self.x1 >= self.width:
+        self.x1 = self.width - 1
+      if self.y1 >= self.height:
+        self.y1 = self.height - 1
 
       
       # assert self.x1 < self.x2

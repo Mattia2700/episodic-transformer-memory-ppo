@@ -12,10 +12,12 @@ from buffer import Buffer
 from model import ActorCriticModel
 from utils import batched_index_select, create_env, polynomial_decay, process_episode_info
 from worker import Worker
-
+from gymnasium import spaces
+INPUT_SIZE = 1024+1024+5+450
+ACT_NUM=9
 class PPOTrainer:
 
-    def __init__(self, config:dict, dataset, run_id:str="run", device:torch.device=torch.device("cuda:0")) -> None:
+    def __init__(self, config:dict, run_id:str="run", device:torch.device=torch.device("cuda:0")) -> None:
         """Initializes all needed training components.
 
         Arguments:
@@ -34,7 +36,7 @@ class PPOTrainer:
         self.memory_length = config["transformer"]["memory_length"]
         self.num_blocks = config["transformer"]["num_blocks"]
         self.embed_dim = config["transformer"]["embed_dim"]
-        self.dataset = dataset
+        # self.dataset = dataset
         self.save_counter = 0
 
         # Setup Tensorboard Summary Writer
@@ -45,11 +47,11 @@ class PPOTrainer:
 
         # Init dummy environment to retrieve action space, observation space and max episode length
         print("Step 1: Init dummy environment")
-        dummy_env = create_env(self.config["environment"], self.dataset, 1)
-        observation_space = dummy_env.observation_space
-        self.action_space_shape = (dummy_env.action_space.n,)
-        self.max_episode_length = dummy_env.max_episode_steps
-        dummy_env.close()
+        # dummy_env = create_env(self.config["environment"], 1)
+        observation_space = spaces.Box(low=-100000, high=100000, shape=(INPUT_SIZE,))#(dummy_env.action_space.n,)#dummy_env.observation_space
+        self.action_space_shape = (ACT_NUM,)
+        self.max_episode_length = 50# dummy_env.max_episode_steps
+        # dummy_env.close()
 
         # Init buffer
         print("Step 2: Init buffer")
@@ -63,9 +65,9 @@ class PPOTrainer:
 
         # Init workers
         print("Step 4: Init environment workers")
-        self.workers = [Worker(self.config["environment"], self.dataset, self.config["n_workers"]) for w in range(self.num_workers)]
+        self.workers = [Worker(self.config["environment"], self.config["n_workers"]) for w in range(self.num_workers)]
         self.worker_ids = range(self.num_workers)
-        self.worker_current_episode_step = torch.zeros((self.num_workers, ), dtype=torch.long)
+        self.worker_current_episode_step = torch.zeros((self.num_workers, ), dtype=torch.long).to(self.device)
         # Reset workers (i.e. environments)
         print("Step 5: Reset workers")
         for worker in self.workers:
@@ -83,7 +85,7 @@ class PPOTrainer:
         # Setup placeholders for each worker's current episodic memory
         self.memory = torch.zeros((self.num_workers, self.max_episode_length, self.num_blocks, self.embed_dim), dtype=torch.float32).to(self.device)
         # Generate episodic memory mask used in attention
-        self.memory_mask = torch.tril(torch.ones((self.memory_length, self.memory_length)), diagonal=-1).to(self.device)
+        self.memory_mask = torch.tril(torch.ones((self.memory_length, self.memory_length)).to(self.device), diagonal=-1).to(self.device)
         """ e.g. memory mask tensor looks like this if memory_length = 6
         0, 0, 0, 0, 0, 0
         1, 0, 0, 0, 0, 0
@@ -93,8 +95,8 @@ class PPOTrainer:
         1, 1, 1, 1, 1, 0
         """         
         # Setup memory window indices to support a sliding window over the episodic memory
-        repetitions = torch.repeat_interleave(torch.arange(0, self.memory_length).unsqueeze(0), self.memory_length - 1, dim = 0).long().to(self.device)
-        self.memory_indices = torch.stack([torch.arange(i, i + self.memory_length) for i in range(self.max_episode_length - self.memory_length + 1)]).long().to(self.device)
+        repetitions = torch.repeat_interleave(torch.arange(0, self.memory_length).unsqueeze(0).to(self.device), self.memory_length - 1, dim = 0).long().to(self.device)
+        self.memory_indices = torch.stack([torch.arange(i, i + self.memory_length).to(self.device) for i in range(self.max_episode_length - self.memory_length + 1)]).long().to(self.device)
         self.memory_indices = torch.cat((repetitions, self.memory_indices)).to(self.device)
         """ e.g. the memory window indices tensor looks like this if memory_length = 4 and max_episode_length = 7:
         0, 1, 2, 3
@@ -135,7 +137,7 @@ class PPOTrainer:
             # Print training statistics
             result = "{:4} reward={:.2f} std={:.2f} length={:.1f} std={:.2f} pi_loss={:3f} v_loss={:3f} entropy={:.3f} loss={:3f} value={:.3f} advantage={:.3f} iou={:.3f}".format(
                     update, episode_result["reward_mean"], episode_result["reward_std"], episode_result["length_mean"], episode_result["length_std"], 
-                    training_stats[0], training_stats[1], training_stats[3], training_stats[2], torch.mean(self.buffer.values), torch.mean(self.buffer.advantages), episode_result["iou_mean"])
+                    training_stats[0], training_stats[1], training_stats[3], training_stats[2], torch.mean(self.buffer.values).to(self.device), torch.mean(self.buffer.advantages).to(self.device), episode_result["iou_mean"])
             print(result)
             print(episode_infos[-1]["pred_bbox"], episode_infos[-1]["target_bbox"])
 
@@ -169,12 +171,12 @@ class PPOTrainer:
                 # Store the initial observations inside the buffer
                 self.buffer.obs[:, t] = torch.tensor(self.obs).to(self.device)
                 # Store mask and memory indices inside the buffer
-                self.buffer.memory_mask[:, t] = self.memory_mask[torch.clip(self.worker_current_episode_step, 0, self.memory_length - 1)]
+                self.buffer.memory_mask[:, t] = self.memory_mask[torch.clip(self.worker_current_episode_step, 0, self.memory_length - 1).to(self.device)]
                 self.buffer.memory_indices[:, t] = self.memory_indices[self.worker_current_episode_step]
                 # Retrieve the memory window from the entire episodic memory
                 sliced_memory = batched_index_select(self.memory, 1, self.buffer.memory_indices[:,t])
                 # Forward the model to retrieve the policy, the states' value and the new memory item
-                policy, value, memory = self.model(torch.tensor(self.obs), sliced_memory, self.buffer.memory_mask[:, t],
+                policy, value, memory = self.model(torch.tensor(self.obs).to(self.device), sliced_memory, self.buffer.memory_mask[:, t],
                                                    self.buffer.memory_indices[:,t])
                 
                 # Add new memory item to the episodic memory
@@ -188,8 +190,8 @@ class PPOTrainer:
                     actions.append(action)
                     log_probs.append(action_branch.log_prob(action))
                 # Write actions, log_probs and values to buffer
-                self.buffer.actions[:, t] = torch.stack(actions, dim=1)
-                self.buffer.log_probs[:, t] = torch.stack(log_probs, dim=1)
+                self.buffer.actions[:, t] = torch.stack(actions, dim=1).to(self.device)
+                self.buffer.log_probs[:, t] = torch.stack(log_probs, dim=1).to(self.device)
                 self.buffer.values[:, t] = value
 
             # Send actions to the environments
@@ -213,7 +215,7 @@ class PPOTrainer:
                     mem_index = self.buffer.memory_index[w, t]
                     self.buffer.memories[mem_index] = self.buffer.memories[mem_index].clone()
                     # Reset episodic memory
-                    self.memory[w] = torch.zeros((self.max_episode_length, self.num_blocks, self.embed_dim), dtype=torch.float32)
+                    self.memory[w] = torch.zeros((self.max_episode_length, self.num_blocks, self.embed_dim), dtype=torch.float32).to(self.device)
                     if t < self.config["worker_steps"] - 1:
                         # Store memory inside the buffer
                         self.buffer.memories.append(self.memory[w])
@@ -235,12 +237,12 @@ class PPOTrainer:
     def get_last_value(self):
         """Returns:
                 {torch.tensor} -- Last value of the current observation and memory window to compute GAE"""
-        start = torch.clip(self.worker_current_episode_step - self.memory_length, 0)
-        end = torch.clip(self.worker_current_episode_step, self.memory_length)
-        indices = torch.stack([torch.arange(start[b],end[b]) for b in range(self.num_workers)]).long()
+        start = torch.clip(self.worker_current_episode_step - self.memory_length, 0).to(self.device)
+        end = torch.clip(self.worker_current_episode_step, self.memory_length).to(self.device)
+        indices = torch.stack([torch.arange(start[b],end[b]).to(self.device) for b in range(self.num_workers)]).long().to(self.device)
         sliced_memory = batched_index_select(self.memory, 1, indices) # Retrieve the memory window from the entire episode
-        _, last_value, _ = self.model(torch.tensor(self.obs),
-                                        sliced_memory, self.memory_mask[torch.clip(self.worker_current_episode_step, 0, self.memory_length - 1)],
+        _, last_value, _ = self.model(torch.tensor(self.obs).to(self.device),
+                                        sliced_memory, self.memory_mask[torch.clip(self.worker_current_episode_step, 0, self.memory_length - 1).to(self.device)],
                                         self.buffer.memory_indices[:,-1])
         return last_value
 
@@ -286,23 +288,23 @@ class PPOTrainer:
         for i, policy_branch in enumerate(policy):
             log_probs.append(policy_branch.log_prob(samples["actions"][:, i]))
             entropies.append(policy_branch.entropy())
-        log_probs = torch.stack(log_probs, dim=1)
-        entropies = torch.stack(entropies, dim=1).sum(1).reshape(-1)
+        log_probs = torch.stack(log_probs, dim=1).to(self.device)
+        entropies = torch.stack(entropies, dim=1).sum(1).reshape(-1).to(self.device)
 
         # Compute policy surrogates to establish the policy loss
         normalized_advantage = (samples["advantages"] - samples["advantages"].mean()) / (samples["advantages"].std() + 1e-8)
         normalized_advantage = normalized_advantage.unsqueeze(1).repeat(1, len(self.action_space_shape)) # Repeat is necessary for multi-discrete action spaces
         log_ratio = log_probs - samples["log_probs"]
-        ratio = torch.exp(log_ratio)
+        ratio = torch.exp(log_ratio).to(self.device)
         surr1 = ratio * normalized_advantage
-        surr2 = torch.clamp(ratio, 1.0 - clip_range, 1.0 + clip_range) * normalized_advantage
-        policy_loss = torch.min(surr1, surr2)
+        surr2 = torch.clamp(ratio, 1.0 - clip_range, 1.0 + clip_range).to(self.device) * normalized_advantage
+        policy_loss = torch.min(surr1, surr2).to(self.device)
         policy_loss = policy_loss.mean()
 
         # Value  function loss
         sampled_return = samples["values"] + samples["advantages"]
         clipped_value = samples["values"] + (value - samples["values"]).clamp(min=-clip_range, max=clip_range)
-        vf_loss = torch.max((value - sampled_return) ** 2, (clipped_value - sampled_return) ** 2)
+        vf_loss = torch.max((value - sampled_return) ** 2, (clipped_value - sampled_return) ** 2).to(self.device)
         vf_loss = vf_loss.mean()
 
         # Entropy Bonus
@@ -316,7 +318,7 @@ class PPOTrainer:
             pg["lr"] = learning_rate
         self.optimizer.zero_grad()
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=self.config["max_grad_norm"])
+        torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=self.config["max_grad_norm"]).to(self.device)
         self.optimizer.step()
 
         # Monitor additional training stats
@@ -346,8 +348,8 @@ class PPOTrainer:
         self.writer.add_scalar("losses/policy_loss", training_stats[0], update)
         self.writer.add_scalar("losses/value_loss", training_stats[1], update)
         self.writer.add_scalar("losses/entropy", training_stats[3], update)
-        self.writer.add_scalar("training/value_mean", torch.mean(self.buffer.values), update)
-        self.writer.add_scalar("training/advantage_mean", torch.mean(self.buffer.advantages), update)
+        self.writer.add_scalar("training/value_mean", torch.mean(self.buffer.values).to(self.device), update)
+        self.writer.add_scalar("training/advantage_mean", torch.mean(self.buffer.advantages).to(self.device), update)
         self.writer.add_scalar("other/clip_fraction", training_stats[4], update)
         self.writer.add_scalar("other/kl", training_stats[5], update)
         
