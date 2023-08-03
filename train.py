@@ -3,6 +3,19 @@ from docopt import docopt
 from trainer import PPOTrainer
 from yaml_parser import YamlParser
 
+import gymnasium as gym
+gym.envs.register(
+     id='VisualGroundingEnv-v0',
+     entry_point='environments:VisualGroundingEnv',
+)
+
+from dataset import RefCOCOg
+
+DEVICE = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+
+
+training = RefCOCOg("..", "train")
+
 def main():
     # Command line arguments via docopt
     _USAGE = """
@@ -31,7 +44,7 @@ def main():
         torch.set_default_tensor_type("torch.FloatTensor")
 
     # Initialize the PPO trainer and commence training
-    trainer = PPOTrainer(config, run_id=run_id, device=device)
+    trainer = PPOTrainer(config, run_id=run_id, device=device, dataset=training)
     trainer.run_training()
     trainer.close()
 

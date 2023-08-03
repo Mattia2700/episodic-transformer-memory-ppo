@@ -3,7 +3,7 @@ import numpy as np
 import time
 
 from gym import spaces
-from gym_minigrid.wrappers import *
+# from gym_minigrid.wrappers import *
 
 class Minigrid:
     def __init__(self, name):

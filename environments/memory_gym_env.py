@@ -1,6 +1,6 @@
 import gymnasium as gym
 import numpy as np
-import memory_gym
+# import memory_gym
 import os
 os.environ["PYGAME_HIDE_SUPPORT_PROMPT"] = "hide"
 

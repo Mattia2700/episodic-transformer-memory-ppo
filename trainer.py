@@ -14,7 +14,8 @@ from utils import batched_index_select, create_env, polynomial_decay, process_ep
 from worker import Worker
 
 class PPOTrainer:
-    def __init__(self, config:dict, run_id:str="run", device:torch.device=torch.device("cpu")) -> None:
+
+    def __init__(self, config:dict, dataset, run_id:str="run", device:torch.device=torch.device("cuda:0")) -> None:
         """Initializes all needed training components.
 
         Arguments:
@@ -33,6 +34,8 @@ class PPOTrainer:
         self.memory_length = config["transformer"]["memory_length"]
         self.num_blocks = config["transformer"]["num_blocks"]
         self.embed_dim = config["transformer"]["embed_dim"]
+        self.dataset = dataset
+        self.save_counter = 0
 
         # Setup Tensorboard Summary Writer
         if not os.path.exists("./summaries"):
@@ -42,7 +45,7 @@ class PPOTrainer:
 
         # Init dummy environment to retrieve action space, observation space and max episode length
         print("Step 1: Init dummy environment")
-        dummy_env = create_env(self.config["environment"])
+        dummy_env = create_env(self.config["environment"], self.dataset, 1)
         observation_space = dummy_env.observation_space
         self.action_space_shape = (dummy_env.action_space.n,)
         self.max_episode_length = dummy_env.max_episode_steps
@@ -60,7 +63,7 @@ class PPOTrainer:
 
         # Init workers
         print("Step 4: Init environment workers")
-        self.workers = [Worker(self.config["environment"]) for w in range(self.num_workers)]
+        self.workers = [Worker(self.config["environment"], self.dataset, self.config["n_workers"]) for w in range(self.num_workers)]
         self.worker_ids = range(self.num_workers)
         self.worker_current_episode_step = torch.zeros((self.num_workers, ), dtype=torch.long)
         # Reset workers (i.e. environments)
@@ -69,13 +72,18 @@ class PPOTrainer:
             worker.child.send(("reset", None))
         # Grab initial observations and store them in their respective placeholder location
         self.obs = np.zeros((self.num_workers,) + observation_space.shape, dtype=np.float32)
+        # print("OBS", self.obs.shape)
         for w, worker in enumerate(self.workers):
-            self.obs[w] = worker.child.recv()
+            # print("W", w)
+            a = worker.child.recv()
+            # print("A",a)
+            # print("A SHAPE:",a.shape)
+            self.obs[w] = a[0]
 
         # Setup placeholders for each worker's current episodic memory
-        self.memory = torch.zeros((self.num_workers, self.max_episode_length, self.num_blocks, self.embed_dim), dtype=torch.float32)
+        self.memory = torch.zeros((self.num_workers, self.max_episode_length, self.num_blocks, self.embed_dim), dtype=torch.float32).to(self.device)
         # Generate episodic memory mask used in attention
-        self.memory_mask = torch.tril(torch.ones((self.memory_length, self.memory_length)), diagonal=-1)
+        self.memory_mask = torch.tril(torch.ones((self.memory_length, self.memory_length)), diagonal=-1).to(self.device)
         """ e.g. memory mask tensor looks like this if memory_length = 6
         0, 0, 0, 0, 0, 0
         1, 0, 0, 0, 0, 0
@@ -85,9 +93,9 @@ class PPOTrainer:
         1, 1, 1, 1, 1, 0
         """         
         # Setup memory window indices to support a sliding window over the episodic memory
-        repetitions = torch.repeat_interleave(torch.arange(0, self.memory_length).unsqueeze(0), self.memory_length - 1, dim = 0).long()
-        self.memory_indices = torch.stack([torch.arange(i, i + self.memory_length) for i in range(self.max_episode_length - self.memory_length + 1)]).long()
-        self.memory_indices = torch.cat((repetitions, self.memory_indices))
+        repetitions = torch.repeat_interleave(torch.arange(0, self.memory_length).unsqueeze(0), self.memory_length - 1, dim = 0).long().to(self.device)
+        self.memory_indices = torch.stack([torch.arange(i, i + self.memory_length) for i in range(self.max_episode_length - self.memory_length + 1)]).long().to(self.device)
+        self.memory_indices = torch.cat((repetitions, self.memory_indices)).to(self.device)
         """ e.g. the memory window indices tensor looks like this if memory_length = 4 and max_episode_length = 7:
         0, 1, 2, 3
         0, 1, 2, 3
@@ -125,19 +133,18 @@ class PPOTrainer:
             episode_result = process_episode_info(episode_infos)
 
             # Print training statistics
-            if "success" in episode_result:
-                result = "{:4} reward={:.2f} std={:.2f} length={:.1f} std={:.2f} success={:.2f} pi_loss={:3f} v_loss={:3f} entropy={:.3f} loss={:3f} value={:.3f} advantage={:.3f}".format(
-                    update, episode_result["reward_mean"], episode_result["reward_std"], episode_result["length_mean"], episode_result["length_std"], episode_result["success"],
-                    training_stats[0], training_stats[1], training_stats[3], training_stats[2], torch.mean(self.buffer.values), torch.mean(self.buffer.advantages))
-            else:
-                result = "{:4} reward={:.2f} std={:.2f} length={:.1f} std={:.2f} pi_loss={:3f} v_loss={:3f} entropy={:.3f} loss={:3f} value={:.3f} advantage={:.3f}".format(
+            result = "{:4} reward={:.2f} std={:.2f} length={:.1f} std={:.2f} pi_loss={:3f} v_loss={:3f} entropy={:.3f} loss={:3f} value={:.3f} advantage={:.3f} iou={:.3f}".format(
                     update, episode_result["reward_mean"], episode_result["reward_std"], episode_result["length_mean"], episode_result["length_std"], 
-                    training_stats[0], training_stats[1], training_stats[3], training_stats[2], torch.mean(self.buffer.values), torch.mean(self.buffer.advantages))
+                    training_stats[0], training_stats[1], training_stats[3], training_stats[2], torch.mean(self.buffer.values), torch.mean(self.buffer.advantages), episode_result["iou_mean"])
             print(result)
+            print(episode_infos[-1]["pred_bbox"], episode_infos[-1]["target_bbox"])
 
             # Write training statistics to tensorboard
             self._write_gradient_summary(update, grad_info)
             self._write_training_summary(update, training_stats, episode_result)
+
+            if update % self.config["save_interval"] == 0:
+                self._save_model()
 
         # Save the trained model at the end of the training
         self._save_model()
@@ -160,7 +167,7 @@ class PPOTrainer:
             # Gradients can be omitted for sampling training data
             with torch.no_grad():
                 # Store the initial observations inside the buffer
-                self.buffer.obs[:, t] = torch.tensor(self.obs)
+                self.buffer.obs[:, t] = torch.tensor(self.obs).to(self.device)
                 # Store mask and memory indices inside the buffer
                 self.buffer.memory_mask[:, t] = self.memory_mask[torch.clip(self.worker_current_episode_step, 0, self.memory_length - 1)]
                 self.buffer.memory_indices[:, t] = self.memory_indices[self.worker_current_episode_step]
@@ -192,10 +199,11 @@ class PPOTrainer:
             # Retrieve step results from the environments
             for w, worker in enumerate(self.workers):
                 obs, self.buffer.rewards[w, t], self.buffer.dones[w, t], info = worker.child.recv()
-                if info: # i.e. done
+                if info["trigger_pressed"] or self.buffer.dones[w,t] or self.worker_current_episode_step[w] >= self.max_episode_length - 1:
                     # Reset the worker's current timestep
                     self.worker_current_episode_step[w] = 0
                     # Store the information of the completed episode (e.g. total reward, episode length)
+                    # print("INFO", info)
                     episode_infos.append(info)
                     # Reset the agent (potential interface for providing reset parameters)
                     worker.child.send(("reset", None))
@@ -215,7 +223,7 @@ class PPOTrainer:
                     # Increment worker timestep
                     self.worker_current_episode_step[w] +=1
                 # Store latest observations
-                self.obs[w] = obs
+                self.obs[w] = obs[0]
                             
         # Compute the last value of the current observation and memory window to compute GAE
         last_value = self.get_last_value()
@@ -238,8 +246,8 @@ class PPOTrainer:
 
     def _train_epochs(self, learning_rate:float, clip_range:float, beta:float) -> list:
         """Trains several PPO epochs over one batch of data while dividing the batch into mini batches.
-        
         Arguments:
+        sqeezes the batch dimension to make the data compatible with the model
             learning_rate {float} -- The current learning rate
             clip_range {float} -- The current clip range
             beta {float} -- The current entropy bonus coefficient
@@ -357,9 +365,11 @@ class PPOTrainer:
         """Saves the model and the used training config to the models directory. The filename is based on the run id."""
         if not os.path.exists("./models"):
             os.makedirs("./models")
-        self.model.cpu()
-        pickle.dump((self.model.state_dict(), self.config), open("./models/" + self.run_id + ".nn", "wb"))
-        print("Model saved to " + "./models/" + self.run_id + ".nn")
+        # self.model.cpu()
+        torch.save({'model':self.model.state_dict(),'params':self.config}, "models/" + self.run_id + ".nn")
+        print("Model saved to " + "./models/" + self.run_id + "-" + str(self.save_counter) + ".nn")
+        # self.model = self.model.cuda()
+        self.save_counter += 1
 
     def close(self) -> None:
         """Terminates the trainer and all related processes."""

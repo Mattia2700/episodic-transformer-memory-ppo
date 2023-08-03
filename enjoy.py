@@ -6,6 +6,16 @@ from docopt import docopt
 from model import ActorCriticModel
 from utils import create_env
 
+import gymnasium as gym
+gym.envs.register(
+     id='VisualGroundingEnv-v0',
+     entry_point='environments:VisualGroundingEnv',
+)
+
+from dataset import RefCOCOg
+
+validation = RefCOCOg('..', 'val')
+
 def init_transformer_memory(trxl_conf, max_episode_steps, device):
     """Returns initial tensors for the episodic memory of the transformer.
 
@@ -41,54 +51,69 @@ def main():
     model_path = options["--model"]
 
     # Set inference device and default tensor type
-    device = torch.device("cpu")
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     torch.set_default_tensor_type("torch.FloatTensor")
 
     # Load model and config
-    state_dict, config = pickle.load(open(model_path, "rb"))
+    state_dict, config = torch.load(model_path, map_location=device)
 
     # Instantiate environment
-    env = create_env(config["environment"], render=True)
+    env = create_env(config["environment"], validation, 1, render=True)
 
     # Initialize model and load its parameters
     model = ActorCriticModel(config, env.observation_space, (env.action_space.n,), env.max_episode_steps)
     model.load_state_dict(state_dict)
     model.to(device)
     model.eval()
-    
-    # Run and render episode
-    done = False
-    episode_rewards = []
-    memory, memory_mask, memory_indices = init_transformer_memory(config["transformer"], env.max_episode_steps, device)
-    memory_length = config["transformer"]["memory_length"]
-    t = 0
-    obs = env.reset()
-    while not done:
-        # Prepare observation and memory
-        obs = torch.tensor(np.expand_dims(obs, 0), dtype=torch.float32, device=device)
-        in_memory = memory[0, memory_indices[t].unsqueeze(0)]
-        t_ = max(0, min(t, memory_length - 1))
-        mask = memory_mask[t_].unsqueeze(0)
-        indices = memory_indices[t].unsqueeze(0)
-        # Render environment
-        env.render()
-        # Forward model
-        policy, value, new_memory = model(obs, in_memory, mask, indices)
-        memory[:, t] = new_memory
-        # Sample action
-        action = []
-        for action_branch in policy:
-            action.append(action_branch.sample().item())
-        # Step environemnt
-        obs, reward, done, info = env.step(action)
-        episode_rewards.append(reward)
-        t += 1
-    
-    # after done, render last state
-    env.render()
 
-    print("Episode length: " + str(info["length"]))
-    print("Episode reward: " + str(info["reward"]))
+    iou = 0
+    iou_count = 0
+    for ep in range(len(validation)):
+        # Run and render episode
+        done = False
+        episode_rewards = []
+        memory, memory_mask, memory_indices = init_transformer_memory(config["transformer"], env.max_episode_steps, device)
+        memory_length = config["transformer"]["memory_length"]
+        t = 0
+        obs, info = env.reset()
+        i = 0
+        # print("obs is ",type(obs),"with shape ",obs.shape)
+        while not(info["trigger_pressed"]) and i<env.max_episode_steps:
+            # Prepare observation and memory
+            # tmp = np.expand_dims(obs, 0)
+            # print("tmp is ",tmp.shape)
+            obs = torch.tensor(obs, dtype=torch.float32, device=device).unsqueeze(0)
+            in_memory = memory[0, memory_indices[t].unsqueeze(0)]
+            t_ = max(0, min(t, memory_length - 1))
+            mask = memory_mask[t_].unsqueeze(0)
+            indices = memory_indices[t].unsqueeze(0)
+            # # Render environment
+            # env.render()
+            # Forward model
+            # print(obs.shape, in_memory.shape, mask.shape, indices.shape)
+            policy, value, new_memory = model(obs, in_memory, mask, indices)
+            memory[:, t] = new_memory
+            # Sample action
+            action = []
+            for action_branch in policy:
+                action.append(action_branch.sample().item())
+            # print("taken action #",action)
+            # Step environemnt
+            obs, reward, done, info = env.step(action)
+            episode_rewards.append(reward)
+            i += 1
+        iou += info["iou"]
+        iou_count += 1
+        
+        # after done, render last state
+        # env.render()
+        print("Episode: {}".format(ep+1), end="\t\t")
+        print("Length: {}".format(info["length"]), end="\t\t")
+        print("Reward: {:.3f}".format(info["reward"]), end="\t\t")
+        print("IoU: {:.3f}".format(info["iou"]), end="\t\t")
+        print("Mean IoU: {:.3f}".format(iou / iou_count), end="\t\t")
+        print("Predicted bbox: {}".format(info["pred_bbox"]), end="\t\t")
+        print("Ground truth bbox: {}".format(info["target_bbox"]))
 
     env.close()
 

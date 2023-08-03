@@ -7,6 +7,8 @@ from torch.nn import functional as F
 
 from transformer import Transformer
 
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
 class ActorCriticModel(nn.Module):
     def __init__(self, config, observation_space, action_space_shape, max_episode_length):
         """Model setup
@@ -22,39 +24,28 @@ class ActorCriticModel(nn.Module):
         self.memory_layer_size = config["transformer"]["embed_dim"]
         self.observation_space_shape = observation_space.shape
         self.max_episode_length = max_episode_length
+        # Case: vector observation is available
+        in_features_next_layer = observation_space.shape[0]
 
-        # Observation encoder
-        if len(self.observation_space_shape) > 1:
-            # Case: visual observation is available
-            # Visual encoder made of 3 convolutional layers
-            self.conv1 = nn.Conv2d(observation_space.shape[0], 32, 8, 4,)
-            self.conv2 = nn.Conv2d(32, 64, 4, 2, 0)
-            self.conv3 = nn.Conv2d(64, 64, 3, 1, 0)
-            nn.init.orthogonal_(self.conv1.weight, np.sqrt(2))
-            nn.init.orthogonal_(self.conv2.weight, np.sqrt(2))
-            nn.init.orthogonal_(self.conv3.weight, np.sqrt(2))
-            # Compute output size of convolutional layers
-            self.conv_out_size = self.get_conv_output(observation_space.shape)
-            in_features_next_layer = self.conv_out_size
-        else:
-            # Case: vector observation is available
-            in_features_next_layer = observation_space.shape[0]
-        
         # Hidden layer
         self.lin_hidden = nn.Linear(in_features_next_layer, self.memory_layer_size)
         nn.init.orthogonal_(self.lin_hidden.weight, np.sqrt(2))
+        self.lin_hidden = self.lin_hidden.to(DEVICE)
 
         # Transformer Blocks
         self.transformer = Transformer(config["transformer"], self.memory_layer_size, self.max_episode_length)
+        self.transformer = self.transformer.to(DEVICE)
 
         # Decouple policy from value
         # Hidden layer of the policy
         self.lin_policy = nn.Linear(self.memory_layer_size, self.hidden_size)
         nn.init.orthogonal_(self.lin_policy.weight, np.sqrt(2))
+        self.lin_policy = self.lin_policy.to(DEVICE)
 
         # Hidden layer of the value function
         self.lin_value = nn.Linear(self.memory_layer_size, self.hidden_size)
         nn.init.orthogonal_(self.lin_value.weight, np.sqrt(2))
+        self.lin_value = self.lin_value.to(DEVICE)
 
         # Outputs / Model heads
         # Policy (Multi-discrete categorical distribution)
@@ -62,11 +53,13 @@ class ActorCriticModel(nn.Module):
         for num_actions in action_space_shape:
             actor_branch = nn.Linear(in_features=self.hidden_size, out_features=num_actions)
             nn.init.orthogonal_(actor_branch.weight, np.sqrt(0.01))
+            actor_branch = actor_branch.to(DEVICE)
             self.policy_branches.append(actor_branch)
             
         # Value function
         self.value = nn.Linear(self.hidden_size, 1)
         nn.init.orthogonal_(self.value.weight, 1)
+        self.value = self.value.to(DEVICE)
 
     def forward(self, obs:torch.tensor, memory:torch.tensor, memory_mask:torch.tensor, memory_indices:torch.tensor):
         """Forward pass of the model
@@ -82,17 +75,8 @@ class ActorCriticModel(nn.Module):
             {torch.tensor} -- Value function: Value
         """
         # Set observation as input to the model
-        h = obs
-        # Forward observation encoder
-        if len(self.observation_space_shape) > 1:
-            batch_size = h.size()[0]
-            # Propagate input through the visual encoder
-            h = F.relu(self.conv1(h))
-            h = F.relu(self.conv2(h))
-            h = F.relu(self.conv3(h))
-            # Flatten the output of the convolutional layers
-            h = h.reshape((batch_size, -1))
 
+        h = obs
         # Feed hidden layer
         h = F.relu(self.lin_hidden(h))
         
@@ -107,23 +91,13 @@ class ActorCriticModel(nn.Module):
         # Head: Value function
         value = self.value(h_value).reshape(-1)
         # Head: Policy
-        pi = [Categorical(logits=branch(h_policy)) for branch in self.policy_branches]
+        pi = []
+        for branch in self.policy_branches:
+            branch = branch.to(DEVICE)
+            val = branch(h_policy)
+            pi.append(Categorical(logits=val))
         
         return pi, value, memory
-
-    def get_conv_output(self, shape:tuple) -> int:
-        """Computes the output size of the convolutional layers by feeding a dummy tensor.
-
-        Arguments:
-            shape {tuple} -- Input shape of the data feeding the first convolutional layer
-
-        Returns:
-            {int} -- Number of output features returned by the utilized convolutional layers
-        """
-        o = self.conv1(torch.zeros(1, *shape))
-        o = self.conv2(o)
-        o = self.conv3(o)
-        return int(np.prod(o.size()))
     
     def get_grad_norm(self):
         """Returns the norm of the gradients of the model.

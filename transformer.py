@@ -5,6 +5,8 @@ from einops import rearrange
 from torch import nn
 from utils import Module
 
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
 class MultiHeadAttention(nn.Module):
     """Multi Head Attention without dropout inspired by https://github.com/aladdinpersson/Machine-Learning-Collection
     https://youtu.be/U0s0f995w14"""
@@ -23,10 +25,10 @@ class MultiHeadAttention(nn.Module):
             self.head_size * num_heads == embed_dim
         ), "Embedding dimension needs to be divisible by the number of heads"
 
-        self.values = nn.Linear(self.head_size, self.head_size, bias=False)
-        self.keys = nn.Linear(self.head_size, self.head_size, bias=False)
-        self.queries = nn.Linear(self.head_size, self.head_size, bias=False)
-        self.fc_out = nn.Linear(self.num_heads * self.head_size, embed_dim)
+        self.values = nn.Linear(self.head_size, self.head_size, bias=False).to(DEVICE)
+        self.keys = nn.Linear(self.head_size, self.head_size, bias=False).to(DEVICE)
+        self.queries = nn.Linear(self.head_size, self.head_size, bias=False).to(DEVICE)
+        self.fc_out = nn.Linear(self.num_heads * self.head_size, embed_dim).to(DEVICE)
 
     def forward(self, values, keys, query, mask):
         """
@@ -63,7 +65,7 @@ class MultiHeadAttention(nn.Module):
 
         # Mask padded indices so their attention weights become 0
         if mask is not None:
-            energy = energy.masked_fill(mask.unsqueeze(1).unsqueeze(1) == 0, float("-1e20")) # -inf causes NaN
+            energy = energy.masked_fill(mask.unsqueeze(1).unsqueeze(1).to(DEVICE) == 0, -1e20).to(DEVICE) # -inf causes NaN
 
         # Normalize energy values and apply softmax wo retreive the attention scores
         attention = torch.softmax(energy / (self.embed_dim ** (1 / 2)), dim=3)
@@ -96,23 +98,23 @@ class TransformerBlock(Module):
         super(TransformerBlock, self).__init__()
 
         # Attention
-        self.attention = MultiHeadAttention(embed_dim, num_heads)
+        self.attention = MultiHeadAttention(embed_dim, num_heads).to(DEVICE)
 
         # Setup GTrXL if used
         self.use_gtrxl = config["gtrxl"] if "gtrxl" in config else False
         if self.use_gtrxl:
-            self.gate1 = GRUGate(embed_dim, config["gtrxl_bias"])
-            self.gate2 = GRUGate(embed_dim, config["gtrxl_bias"])
+            self.gate1 = GRUGate(embed_dim, config["gtrxl_bias"]).to(DEVICE)
+            self.gate2 = GRUGate(embed_dim, config["gtrxl_bias"]).to(DEVICE)
 
         # LayerNorms
         self.layer_norm = config["layer_norm"]
-        self.norm1 = nn.LayerNorm(embed_dim)
-        self.norm2 = nn.LayerNorm(embed_dim)
+        self.norm1 = nn.LayerNorm(embed_dim).to(DEVICE)
+        self.norm2 = nn.LayerNorm(embed_dim).to(DEVICE)
         if self.layer_norm == "pre":
-            self.norm_kv = nn.LayerNorm(embed_dim)
+            self.norm_kv = nn.LayerNorm(embed_dim).to(DEVICE)
 
         # Feed forward projection
-        self.fc = nn.Sequential(nn.Linear(embed_dim, embed_dim), nn.ReLU())
+        self.fc = nn.Sequential(nn.Linear(embed_dim, embed_dim), nn.ReLU()).to(DEVICE)
 
     def forward(self, value, key, query, mask):
         """
@@ -175,14 +177,14 @@ class SinusoidalPosition(nn.Module):
     """Relative positional encoding"""
     def __init__(self, dim, min_timescale = 2., max_timescale = 1e4):
         super().__init__()
-        freqs = torch.arange(0, dim, min_timescale)
+        freqs = torch.arange(0, dim, min_timescale).to(DEVICE)
         inv_freqs = max_timescale ** (-freqs / dim)
         self.register_buffer('inv_freqs', inv_freqs)
 
     def forward(self, seq_len):
-        seq = torch.arange(seq_len - 1, -1, -1.)
-        sinusoidal_inp = rearrange(seq, 'n -> n ()') * rearrange(self.inv_freqs, 'd -> () d')
-        pos_emb = torch.cat((sinusoidal_inp.sin(), sinusoidal_inp.cos()), dim = -1)
+        seq = torch.arange(seq_len - 1, -1, -1.).to(DEVICE)
+        sinusoidal_inp = rearrange(seq, 'n -> n ()').to(DEVICE) * rearrange(self.inv_freqs, 'd -> () d').to(DEVICE)
+        pos_emb = torch.cat((sinusoidal_inp.sin(), sinusoidal_inp.cos()), dim = -1).to(DEVICE)
         return pos_emb
 
 class Transformer(nn.Module):
@@ -203,21 +205,21 @@ class Transformer(nn.Module):
         self.activation = nn.ReLU()
 
         # Input embedding layer
-        self.linear_embedding = nn.Linear(input_dim, self.embed_dim)
+        self.linear_embedding = nn.Linear(input_dim, self.embed_dim).to(DEVICE)
         nn.init.orthogonal_(self.linear_embedding.weight, np.sqrt(2))
 
         # Determine positional encoding
         if config["positional_encoding"] == "relative":
-            self.pos_embedding = SinusoidalPosition(dim = self.embed_dim)
+            self.pos_embedding = SinusoidalPosition(dim = self.embed_dim).to(DEVICE)
         elif config["positional_encoding"] == "learned":
-            self.pos_embedding = nn.Parameter(torch.randn(self.max_episode_steps, self.embed_dim)) # (batch size, max episoded steps, num layers, layer size)
+            self.pos_embedding = nn.Parameter(torch.randn(self.max_episode_steps, self.embed_dim)).to(DEVICE) # (batch size, max episoded steps, num layers, layer size)
         else:
             pass    # No positional encoding is used
         
         # Instantiate transformer blocks
         self.transformer_blocks = nn.ModuleList([
             TransformerBlock(self.embed_dim, self.num_heads, config) 
-            for _ in range(self.num_blocks)])
+            for _ in range(self.num_blocks)]).to(DEVICE)
 
     def forward(self, h, memories, mask, memory_indices):
         """
@@ -268,12 +270,12 @@ class GRUGate(nn.Module):
             initializes the agent close to a Markovian policy (ignore attention at the beginning). (default: {0.0})
         """
         super(GRUGate, self).__init__()
-        self.Wr = nn.Linear(input_dim, input_dim, bias=False)
-        self.Ur = nn.Linear(input_dim, input_dim, bias=False)
-        self.Wz = nn.Linear(input_dim, input_dim, bias=False)
-        self.Uz = nn.Linear(input_dim, input_dim, bias=False)
-        self.Wg = nn.Linear(input_dim, input_dim, bias=False)
-        self.Ug = nn.Linear(input_dim, input_dim, bias=False)
+        self.Wr = nn.Linear(input_dim, input_dim, bias=False).to(DEVICE)
+        self.Ur = nn.Linear(input_dim, input_dim, bias=False).to(DEVICE)
+        self.Wz = nn.Linear(input_dim, input_dim, bias=False).to(DEVICE)
+        self.Uz = nn.Linear(input_dim, input_dim, bias=False).to(DEVICE)
+        self.Wg = nn.Linear(input_dim, input_dim, bias=False).to(DEVICE)
+        self.Ug = nn.Linear(input_dim, input_dim, bias=False).to(DEVICE)
         self.bg = nn.Parameter(torch.full([input_dim], bg))  # bias
         self.sigmoid = nn.Sigmoid()
         self.tanh = nn.Tanh()
