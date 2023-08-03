@@ -4,3 +4,4 @@ gym
 ruamel.yaml
 tblib
 tensorboard
+git+https://github.com/openai/CLIP.git#egg=clip
