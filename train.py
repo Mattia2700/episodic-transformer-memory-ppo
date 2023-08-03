@@ -3,7 +3,7 @@ from docopt import docopt
 from trainer import PPOTrainer
 from yaml_parser import YamlParser
 
-import gymnasium as gym
+import  gym
 gym.envs.register(
      id='VisualGroundingEnv-v0',
      entry_point='environments:VisualGroundingEnv',

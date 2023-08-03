@@ -6,7 +6,7 @@ from docopt import docopt
 from model import ActorCriticModel
 from utils import create_env
 import torchvision
-import gymnasium as gym
+import  gym
 gym.envs.register(
      id='VisualGroundingEnv-v0',
      entry_point='environments:VisualGroundingEnv',
